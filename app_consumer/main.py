@@ -4,6 +4,10 @@ from psycopg2 import sql
 import json
 from datetime import datetime
 
+import asyncio
+
+from fastapi import FastAPI
+app = FastAPI()
 
 KAFKA_BROKER = 'localhost:29092'
 KAFKA_TOPIC = 'errors'
@@ -14,6 +18,10 @@ PG_DATABASE = 'postgres_db'
 PG_PORT = 5430
 PG_USER = 'postgres_user'
 PG_PASSWORD = 'postgres_password'
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(consume_errors())
 
 
 def create_table_if_not_exists(conn):
@@ -74,6 +82,7 @@ def consume_errors():
 
             try:
                 insert_error(conn, error_data)
+                consumer.commit()
                 print("Error saved to PostgreSQL")
             except Exception as e:
                 print(f"Failed to save error to PostgreSQL: {e}")
@@ -85,6 +94,3 @@ def consume_errors():
         consumer.close()
         conn.close()
 
-
-if __name__ == "__main__":
-    consume_errors()
