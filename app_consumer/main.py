@@ -3,15 +3,13 @@ import psycopg2
 from psycopg2 import sql
 import json
 from datetime import datetime
-
+from contextlib import asynccontextmanager
 import asyncio
-
 from fastapi import FastAPI
-app = FastAPI()
 
+# Конфигурация
 KAFKA_BROKER = 'localhost:29092'
 KAFKA_TOPIC = 'errors'
-
 
 PG_HOST = 'localhost'
 PG_DATABASE = 'postgres_db'
@@ -19,9 +17,10 @@ PG_PORT = 5430
 PG_USER = 'postgres_user'
 PG_PASSWORD = 'postgres_password'
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(consume_errors())
+# Глобальные переменные для ресурсов
+consumer = None
+pg_conn = None
+consumer_task = None
 
 
 def create_table_if_not_exists(conn):
@@ -54,8 +53,10 @@ def insert_error(conn, error_data):
         conn.commit()
 
 
-def consume_errors():
-    conn = psycopg2.connect(
+async def consume_errors():
+    global pg_conn, consumer
+
+    pg_conn = psycopg2.connect(
         host=PG_HOST,
         database=PG_DATABASE,
         user=PG_USER,
@@ -63,15 +64,14 @@ def consume_errors():
         port=PG_PORT
     )
 
-    # Создаем таблицу, если ее нет
-    create_table_if_not_exists(conn)
+    create_table_if_not_exists(pg_conn)
 
-    # Настраиваем Kafka consumer
     consumer = KafkaConsumer(
         KAFKA_TOPIC,
         bootstrap_servers=KAFKA_BROKER,
         auto_offset_reset='earliest',
-        value_deserializer=lambda x: json.loads(x.decode('utf-8')))
+        value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+    )
 
     print(f"Consumer started. Listening to topic: {KAFKA_TOPIC}")
 
@@ -81,16 +81,47 @@ def consume_errors():
             print(f"Received error: {error_data}")
 
             try:
-                insert_error(conn, error_data)
+                insert_error(pg_conn, error_data)
                 consumer.commit()
                 print("Error saved to PostgreSQL")
             except Exception as e:
                 print(f"Failed to save error to PostgreSQL: {e}")
-                conn.rollback()
-
-    except KeyboardInterrupt:
-        print("Consumer stopped by user")
+                pg_conn.rollback()
+    except Exception as e:
+        print(f"Consumer error: {e}")
     finally:
-        consumer.close()
-        conn.close()
+        if consumer:
+            consumer.close()
+        if pg_conn:
+            pg_conn.close()
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global consumer_task
+
+    consumer_task = asyncio.create_task(consume_errors())
+    print("Application startup complete")
+
+    yield
+
+    if consumer_task:
+        consumer_task.cancel()
+        try:
+            await consumer_task
+        except asyncio.CancelledError:
+            pass
+
+    print("Application shutdown complete")
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/")
+async def root():
+    return {"message": "Kafka Consumer Service"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8002)
