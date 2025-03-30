@@ -10,6 +10,7 @@ from fastapi import FastAPI
 # Конфигурация
 KAFKA_BROKER = 'localhost:29092'
 KAFKA_TOPIC = 'errors'
+CONSUMER_GROUP_ID = 'error_consumers'  # Добавлен group_id
 
 PG_HOST = 'localhost'
 PG_DATABASE = 'postgres_db'
@@ -69,7 +70,9 @@ async def consume_errors():
     consumer = KafkaConsumer(
         KAFKA_TOPIC,
         bootstrap_servers=KAFKA_BROKER,
+        group_id=CONSUMER_GROUP_ID,  # Добавлен group_id
         auto_offset_reset='earliest',
+        enable_auto_commit=False,  # Отключаем авто-коммит
         value_deserializer=lambda x: json.loads(x.decode('utf-8'))
     )
 
@@ -82,7 +85,7 @@ async def consume_errors():
 
             try:
                 insert_error(pg_conn, error_data)
-                consumer.commit()
+                consumer.commit()  # Теперь commit будет работать
                 print("Error saved to PostgreSQL")
             except Exception as e:
                 print(f"Failed to save error to PostgreSQL: {e}")
@@ -96,31 +99,14 @@ async def consume_errors():
             pg_conn.close()
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global consumer_task
-
-    consumer_task = asyncio.create_task(consume_errors())
-    print("Application startup complete")
-
-    yield
-
-    if consumer_task:
-        consumer_task.cancel()
-        try:
-            await consumer_task
-        except asyncio.CancelledError:
-            pass
-
-    print("Application shutdown complete")
+app = FastAPI()
 
 
-app = FastAPI(lifespan=lifespan)
-
-
-@app.get("/")
+@app.get("/upload_errors")
 async def root():
+    await consume_errors()
     return {"message": "Kafka Consumer Service"}
+
 
 if __name__ == "__main__":
     import uvicorn
